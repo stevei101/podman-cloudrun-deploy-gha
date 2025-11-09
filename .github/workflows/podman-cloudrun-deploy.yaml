@@ -1,0 +1,224 @@
+name: Podman Build and Cloud Run Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Deployment environment identifier (e.g. dev, staging, prod)."
+        required: true
+        type: string
+      service_name:
+        description: "Logical service name to deploy to Cloud Run."
+        required: true
+        type: string
+      cloud_run_region:
+        description: "Cloud Run region (e.g. us-central1)."
+        required: true
+        type: string
+      gar_repository:
+        description: "Artifact Registry repository name (e.g. services)."
+        required: true
+        type: string
+      dockerfile:
+        description: "Relative path to the Dockerfile."
+        required: false
+        default: Dockerfile
+        type: string
+      build_context:
+        description: "Build context directory passed to Podman."
+        required: false
+        default: .
+        type: string
+      image_tag:
+        description: "Image tag applied to the build (defaults to the commit SHA)."
+        required: false
+        default: "${{ github.sha }}"
+        type: string
+      container_port:
+        description: "Container port exposed by the service (Cloud Run sets PORT env)."
+        required: false
+        default: "8080"
+        type: string
+      allow_unauthenticated:
+        description: "Whether to allow unauthenticated access to the Cloud Run service."
+        required: false
+        default: false
+        type: boolean
+      additional_env_vars:
+        description: "Comma-separated KEY=VALUE pairs passed to gcloud run deploy via --set-env-vars."
+        required: false
+        default: ""
+        type: string
+      additional_secrets:
+        description: "Comma-separated Cloud Run secrets mapping passed via --set-secrets."
+        required: false
+        default: ""
+        type: string
+      terraform_directory:
+        description: "Optional relative path to Terraform configuration. Leave blank to skip."
+        required: false
+        default: ""
+        type: string
+      terraform_workspace:
+        description: "Optional Terraform Cloud workspace to select or create."
+        required: false
+        default: ""
+        type: string
+      terraform_version:
+        description: "Terraform CLI version."
+        required: false
+        default: "1.7.5"
+        type: string
+    secrets:
+      GCP_PROJECT_ID:
+        required: true
+      WIF_PROVIDER:
+        description: "Fully qualified Workload Identity Provider resource name."
+        required: true
+      WIF_SERVICE_ACCOUNT:
+        description: "Service account email to impersonate via WIF."
+        required: true
+      TF_API_TOKEN:
+        description: "Terraform Cloud user/team API token. Required when terraform_directory is set."
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform:
+    if: ${{ inputs.terraform_directory != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout configuration
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Terraform Cloud credentials
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          if [ -z "${TF_API_TOKEN}" ]; then
+            echo "TF_API_TOKEN secret is required when terraform_directory is provided."
+            exit 1
+          fi
+          cat <<'TFRCCONFIG' >> ~/.terraformrc
+          credentials "app.terraform.io" {
+            token = "${TF_API_TOKEN}"
+          }
+TFRCCONFIG
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform Init
+        run: terraform -chdir=${{ inputs.terraform_directory }} init -input=false
+
+      - name: Select or create workspace
+        if: ${{ inputs.terraform_workspace != '' }}
+        run: |
+          terraform -chdir=${{ inputs.terraform_directory }} workspace select ${{ inputs.terraform_workspace }} || terraform -chdir=${{ inputs.terraform_directory }} workspace new ${{ inputs.terraform_workspace }}
+
+      - name: Terraform Apply
+        run: terraform -chdir=${{ inputs.terraform_directory }} apply -auto-approve -input=false
+
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    needs: [terraform]
+    if: ${{ needs.terraform.result == 'success' || needs.terraform.result == 'skipped' }}
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      SERVICE_NAME: ${{ inputs.service_name }}
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+      WORKLOAD_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      REGION: ${{ inputs.cloud_run_region }}
+      GAR_REPOSITORY: ${{ inputs.gar_repository }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      BUILD_CONTEXT: ${{ inputs.build_context }}
+      DOCKERFILE: ${{ inputs.dockerfile }}
+      CONTAINER_PORT: ${{ inputs.container_port }}
+      ADDITIONAL_ENV_VARS: ${{ inputs.additional_env_vars }}
+      ADDITIONAL_SECRETS: ${{ inputs.additional_secrets }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WORKLOAD_IDENTITY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Enable Docker credential helper for Artifact Registry
+        run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Install Podman
+        uses: containers/podman-action@v2
+        with:
+          version: latest
+
+      - name: Build container image with Podman
+        run: |
+          IMAGE_URI="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${SERVICE_NAME}:${IMAGE_TAG}"
+          echo "Building ${IMAGE_URI} from ${DOCKERFILE}"
+          podman build \
+            --file "${DOCKERFILE}" \
+            --tag "${IMAGE_URI}" \
+            "${BUILD_CONTEXT}"
+          podman tag "${IMAGE_URI}" "${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${SERVICE_NAME}:latest"
+        env:
+          REGISTRY: ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Authenticate Podman to Artifact Registry
+        run: |
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          podman login "https://${REGION}-docker.pkg.dev" \
+            --username oauth2accesstoken \
+            --password "${ACCESS_TOKEN}"
+
+      - name: Push images to Artifact Registry
+        run: |
+          IMAGE_BASE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${SERVICE_NAME}"
+          podman push "${IMAGE_BASE}:${IMAGE_TAG}"
+          podman push "${IMAGE_BASE}:latest"
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE_URI="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${SERVICE_NAME}:${IMAGE_TAG}"
+          DEPLOY_CMD=(
+            gcloud run deploy "${SERVICE_NAME}" \
+              --image "${IMAGE_URI}" \
+              --region "${REGION}" \
+              --platform managed \
+              --allow-unauthenticated=${{ inputs.allow_unauthenticated }} \
+              --port "${CONTAINER_PORT}" \
+              --set-env-vars "PORT=${CONTAINER_PORT}"
+          )
+
+          if [ -n "${ADDITIONAL_ENV_VARS}" ]; then
+            DEPLOY_CMD+=("--set-env-vars" "${ADDITIONAL_ENV_VARS}")
+          fi
+
+          if [ -n "${ADDITIONAL_SECRETS}" ]; then
+            DEPLOY_CMD+=("--set-secrets" "${ADDITIONAL_SECRETS}")
+          fi
+
+          echo "Executing: ${DEPLOY_CMD[*]}"
+          "${DEPLOY_CMD[@]}"
+
+      - name: Output Cloud Run service URL
+        run: |
+          gcloud run services describe "${SERVICE_NAME}" \
+            --region "${REGION}" \
+            --format 'value(status.url)'
