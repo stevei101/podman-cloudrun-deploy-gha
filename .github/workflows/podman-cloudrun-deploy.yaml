@@ -128,7 +128,7 @@ jobs:
           credentials "app.terraform.io" {
             token = "${TF_API_TOKEN}"
           }
-TFRCCONFIG
+          TFRCCONFIG
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
