@@ -20,6 +20,10 @@ This guide describes the configuration surface area for the `podman-cloudrun-dep
 | `terraform_directory` | ❌ | `""` | Terraform folder. Leave empty to skip Terraform |
 | `terraform_workspace` | ❌ | `""` | Workspace to select or create when Terraform runs |
 | `terraform_version` | ❌ | `1.7.5` | Terraform CLI version |
+| `bun_install_dependencies` | ❌ | `false` | When `true`, runs `bun install` before building |
+| `bun_prebuild_commands` | ❌ | `` | Newline-separated commands executed after `bun install` |
+| `bun_version` | ❌ | `latest` | Bun version passed to `oven-sh/setup-bun` |
+| `bun_workdir` | ❌ | `` | Working directory for Bun steps (`build_context` when blank) |
 
 ### Example variable strategy
 
@@ -87,9 +91,11 @@ When the workflow runs it will:
 - Use `additional_env_vars` for values that do not belong in secrets (e.g., `ENVIRONMENT`, `FIRESTORE_PROJECT_ID`).
 - Use `additional_secrets` to bind secrets stored in Secret Manager (format `VAR_NAME=SECRET_ID:version`).
 
-## 6. Podman notes
+## 6. Podman & Bun notes
 
 - The workflow uses `containers/podman-action@v2` to provision Podman on the GitHub-hosted runner.
+- Optional Bun steps rely on `oven-sh/setup-bun@v1`; enable them when you need lint/test checks prior to image builds.
+- `bun_workdir` defaults to the `build_context` path when left blank.
 - Local development guidance is provided in `podman/PODMAN_SETUP_GUIDE.md`.
 - Ensure your Dockerfile uses relative copy paths compatible with the repository root.
 

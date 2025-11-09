@@ -55,6 +55,11 @@ jobs:
       additional_secrets: "GEMINI_API_KEY=GEMINI_API_KEY:latest,FIRESTORE_KEY=FIRESTORE_SERVICE_ACCOUNT:latest"
       terraform_directory: infrastructure/terraform
       terraform_workspace: staging
+      bun_install_dependencies: true
+      bun_prebuild_commands: |
+        bun run lint
+        bun run test
+      bun_workdir: infrastructure/docker/frontend
     secrets:
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
@@ -63,6 +68,18 @@ jobs:
 ```
 
 Set `terraform_directory` to an empty string (`""`) if you want to skip Terraform.
+
+### Optional Bun Prebuild Steps
+
+| Input | Description |
+| --- | --- |
+| `bun_install_dependencies` | When `true`, runs `bun install` in the chosen working directory before building. |
+| `bun_prebuild_commands` | Newline-separated commands (for example `bun run lint`) executed after install. Leave empty to skip. |
+| `bun_version` | Version passed to [`oven-sh/setup-bun`](https://github.com/oven-sh/setup-bun). Defaults to `latest`. |
+| `bun_workdir` | Directory for Bun steps. Defaults to the `build_context` input when blank. |
+
+If your project already installs dependencies inside the Docker build (common for Vite/React apps), you can leave these inputs at their defaults. Turn them on when you want CI to lint, type-check, or run tests before creating the container image.
+
 
 ### Required Secrets
 

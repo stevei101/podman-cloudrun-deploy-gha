@@ -51,6 +51,10 @@ jobs:
       allow_unauthenticated: false
       terraform_directory: infrastructure/terraform
       terraform_workspace: staging
+      bun_install_dependencies: true # optional, runs `bun install`
+      bun_prebuild_commands: |
+        bun run lint
+        bun run test
     secrets:
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
@@ -59,6 +63,8 @@ jobs:
 ```
 
 Skip Terraform by setting `terraform_directory: ""`.
+
+Enable the Bun inputs when you want CI to lint, type-check, or run tests before building the container. Leave them at their defaults if the Docker build already handles your install/build steps.
 
 ## 4. Verify Terraform configuration (optional)
 

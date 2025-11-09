@@ -69,6 +69,26 @@ on:
         required: false
         default: "1.7.5"
         type: string
+      bun_install_dependencies:
+        description: "Run bun install before building (defaults to false)."
+        required: false
+        default: false
+        type: boolean
+      bun_prebuild_commands:
+        description: "Optional newline-separated Bun commands to execute before building (e.g. 'bun run lint')."
+        required: false
+        default: ""
+        type: string
+      bun_version:
+        description: "Bun version to install when Bun steps are enabled."
+        required: false
+        default: "latest"
+        type: string
+      bun_workdir:
+        description: "Working directory for Bun steps (defaults to build_context when blank)."
+        required: false
+        default: ""
+        type: string
     secrets:
       GCP_PROJECT_ID:
         required: true
@@ -143,11 +163,41 @@ TFRCCONFIG
       CONTAINER_PORT: ${{ inputs.container_port }}
       ADDITIONAL_ENV_VARS: ${{ inputs.additional_env_vars }}
       ADDITIONAL_SECRETS: ${{ inputs.additional_secrets }}
+      BUN_INSTALL_DEPENDENCIES: ${{ inputs.bun_install_dependencies }}
+      BUN_PREBUILD_COMMANDS: ${{ inputs.bun_prebuild_commands }}
+      BUN_VERSION: ${{ inputs.bun_version }}
+      BUN_WORKDIR: ${{ inputs.bun_workdir != '' && inputs.bun_workdir || inputs.build_context }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up Bun runtime
+        if: ${{ env.BUN_INSTALL_DEPENDENCIES == 'true' || env.BUN_PREBUILD_COMMANDS != '' }}
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Bun install dependencies
+        if: ${{ env.BUN_INSTALL_DEPENDENCIES == 'true' }}
+        working-directory: ${{ env.BUN_WORKDIR }}
+        run: bun install
+
+      - name: Run Bun prebuild commands
+        if: ${{ env.BUN_PREBUILD_COMMANDS != '' }}
+        shell: bash
+        working-directory: ${{ env.BUN_WORKDIR }}
+        env:
+          BUN_PREBUILD_COMMANDS: ${{ env.BUN_PREBUILD_COMMANDS }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r cmd; do
+            if [ -n "$cmd" ]; then
+              echo "+ $cmd"
+              eval "$cmd"
+            fi
+          done <<< "$BUN_PREBUILD_COMMANDS"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
